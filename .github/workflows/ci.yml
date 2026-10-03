@@ -1,0 +1,48 @@
+name: bench
+on:
+  workflow_dispatch:
+    inputs:
+      segments:
+        description: segments
+        required: false
+        default: "150"
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        workers: [8, 16, 32]
+    env:
+      SPEC_JSON: ${{ secrets.BENCH_SPEC }}
+      SEGMENTS: ${{ inputs.segments }}
+      UPLOAD_WORKERS: ${{ matrix.workers }}
+      HF_TOKEN_1: ${{ secrets.HF_TOKEN_1 }}
+      HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
+      HF_REPO_1: ${{ secrets.HF_REPO_1 }}
+      HF_REPO_2: ${{ secrets.HF_REPO_2 }}
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      RUN_TAG: ${{ github.run_id }}w${{ matrix.workers }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: machine
+        run: |
+          echo "RUNNER nproc=$(nproc) mem=$(free -m | awk '/Mem:/{print $2}')MB"
+      - name: install
+        run: pip install -q huggingface_hub hf_xet
+      - name: download only
+        run: MODE=download node run.mjs
+      - name: full pipeline
+        run: MODE=full node run.mjs
+      - name: upload only
+        run: MODE=upload node run.mjs
+      - name: cleanup
+        if: always()
+        run: python tidy.py
