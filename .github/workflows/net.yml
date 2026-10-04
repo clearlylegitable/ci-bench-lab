@@ -1,0 +1,42 @@
+name: net
+on:
+  workflow_dispatch:
+jobs:
+  net:
+    runs-on: ubuntu-latest
+    steps:
+      - name: machine
+        run: |
+          echo "nproc=$(nproc) mem=$(free -m | awk '/Mem:/{print $2}')MB"
+          ip -br addr | head -5
+          ethtool -i eth0 2>/dev/null | head -3 || true
+          curl -s -m 10 https://ipinfo.io/org
+      - name: ookla
+        run: |
+          curl -s -L -o st.tgz https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz
+          tar xzf st.tgz speedtest
+          for n in 1 2; do
+            ./speedtest --accept-license --accept-gdpr -f json > st.json 2>/dev/null || true
+            python3 -c "
+          import json
+          j=json.load(open('st.json'))
+          print('ookla run $n: server %s | down %.0f MB/s | up %.0f MB/s' % (j['server']['name'], j['download']['bandwidth']/1048576, j['upload']['bandwidth']/1048576))
+          "
+          done
+      - name: cloudflare upload
+        run: |
+          up() {
+            for i in $(seq $1); do (head -c 20000000000 /dev/zero | curl -s -m 12 -o /dev/null -T - -X POST -w '%{size_upload}\n' https://speed.cloudflare.com/__up) & done | awk -v n=$1 '{s+=$1} END{printf "cloudflare up x%d: %.0f MB/s\n", n, s/12/1048576}'
+            wait
+          }
+          up 8
+          up 32
+          up 128
+      - name: hetzner download
+        run: |
+          dl() {
+            for i in $(seq $2); do curl -s -L -o /dev/null -m 12 -w '%{size_download}\n' "$1" & done | awk -v n=$2 '{s+=$1} END{printf "download x%d: %.0f MB/s\n", n, s/12/1048576}'
+            wait
+          }
+          dl https://ash-speed.hetzner.com/10GB.bin 32
+          dl https://fsn1-speed.hetzner.com/10GB.bin 32
