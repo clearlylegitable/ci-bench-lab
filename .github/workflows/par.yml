@@ -1,0 +1,66 @@
+name: par
+on:
+  workflow_dispatch:
+    inputs:
+      segments:
+        description: segments
+        required: false
+        default: "150"
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      start: ${{ steps.t.outputs.start }}
+    steps:
+      - id: t
+        run: echo "start=$(( $(date +%s) + 150 ))" >> "$GITHUB_OUTPUT"
+  run:
+    needs: prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        idx: [0, 1, 2, 3]
+    env:
+      ALL: ${{ secrets.BENCH_ALL }}
+      SEGMENTS: ${{ inputs.segments }}
+      PER_JOB: "64"
+      GLOBAL: "64"
+      UPLOAD_WORKERS: "8"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      RUN_TAG: ${{ github.run_id }}p${{ matrix.idx }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          pip install -q huggingface_hub hf_xet
+          pip show hf_xet | grep -E "^(Name|Version)"
+          echo "nproc=$(nproc) mem=$(free -m | awk '/Mem:/{print $2}')MB"
+      - name: select job
+        run: |
+          node -e '
+          const all = JSON.parse(process.env.ALL)[Number(process.env.IDX)];
+          const fs = require("fs");
+          fs.appendFileSync(process.env.GITHUB_ENV, "SPEC_JSON=" + JSON.stringify(all.spec) + "\n");
+          fs.appendFileSync(process.env.GITHUB_ENV, "HF_REPO_1=" + all.repo + "\nHF_REPO_2=" + all.repo + "\n");
+          console.log("::add-mask::" + all.token);
+          fs.appendFileSync(process.env.GITHUB_ENV, "HF_TOKEN_1=" + all.token + "\nHF_TOKEN_2=" + all.token + "\n");
+          '
+        env:
+          IDX: ${{ matrix.idx }}
+      - name: wait for shared start
+        run: |
+          echo "ready at $(date +%T), waiting for start $(date -d @${{ needs.prep.outputs.start }} +%T)"
+          while [ "$(date +%s)" -lt "${{ needs.prep.outputs.start }}" ]; do sleep 0.1; done
+          echo "go at $(date +%T.%N)"
+      - name: mirror
+        run: MODE=full node run.mjs
+      - name: cleanup
+        if: always()
+        run: python tidy.py

@@ -45,6 +45,17 @@ class Semaphore {
 
 const globalLimiter = new Semaphore(GLOBAL);
 
+const T0 = performance.now();
+const since = () => Number(((performance.now() - T0) / 1000).toFixed(1));
+const marks = {};
+const markFirst = (k) => {
+  if (marks[k] === undefined) marks[k] = since();
+};
+const markLast = (k) => {
+  marks[k] = since();
+};
+const pending = { downloading: 0, queuedForUpload: 0 };
+
 class PyWorker {
   constructor() {
     this.proc = null;
@@ -237,12 +248,21 @@ async function runTrack(job, trackIndex, jobLimiter, account, key, iv) {
     await jobLimiter.acquire();
     await globalLimiter.acquire();
     try {
+      markFirst("firstSegmentRequested");
+      pending.downloading++;
       const raw = await download(url);
+      pending.downloading--;
+      markFirst("firstSegmentDownloaded");
+      markLast("lastSegmentDownloaded");
       totals.downBytes += raw.length;
       sizes[sizeKey][i] = raw.length;
       if (MODE === "full") {
         const enc = encrypt(raw, key, iv);
+        pending.queuedForUpload++;
         await scheduler.add(account, nameOf(i), enc);
+        pending.queuedForUpload--;
+        markFirst("firstSegmentCommitted");
+        markLast("lastSegmentCommitted");
         totals.upBytes += enc.length;
       }
     } finally {
@@ -264,6 +284,18 @@ function cpuSnapshot() {
 const cpu0 = cpuSnapshot();
 const t0 = performance.now();
 const finished = {};
+
+let lastDown = 0;
+let lastUp = 0;
+const ticker = setInterval(() => {
+  const c = cpuSnapshot();
+  const t = (performance.now() - t0) / 1000;
+  console.log(
+    `t=${t.toFixed(0)}s down=${(totals.downBytes / 1e6).toFixed(0)}MB (+${((totals.downBytes - lastDown) / 5e6).toFixed(0)}MB/s) committed=${(totals.upBytes / 1e6).toFixed(0)}MB (+${((totals.upBytes - lastUp) / 5e6).toFixed(0)}MB/s) dlInflight=${pending.downloading} waitingCommit=${pending.queuedForUpload} commits=${commitStats.count} cpuIdle=${Math.round(((c.idle - cpu0.idle) / ((c.user - cpu0.user) + (c.sys - cpu0.sys) + (c.idle - cpu0.idle))) * 100)}%`,
+  );
+  lastDown = totals.downBytes;
+  lastUp = totals.upBytes;
+}, 5000);
 
 await Promise.all(jobs.map(async (job, idx) => {
   const account = accounts[idx % accounts.length];
@@ -298,10 +330,13 @@ const result = {
   downMBps: Number((totals.downBytes / 1e6 / wall).toFixed(1)),
   upMBps: Number((totals.upBytes / 1e6 / wall).toFixed(1)),
   perMovieFinishSeconds: finished,
+  timeline: marks,
   cpuPct: { user: Math.round((dU / dT) * 100), sys: Math.round((dS / dT) * 100), idle: Math.round((dI / dT) * 100) },
   commits: commitStats.count
     ? { count: commitStats.count, avgFiles: Number((commitStats.files / commitStats.count).toFixed(1)), minFiles: commitStats.minFiles, maxFiles: commitStats.maxFiles, avgMB: Number((commitStats.bytes / commitStats.count / 1e6).toFixed(0)), avgCommitSec: Number((commitStats.commitMs / commitStats.count / 1000).toFixed(1)) }
     : null,
 };
+clearInterval(ticker);
+clearInterval(ticker);
 console.log(`RESULT_JSON ${JSON.stringify(result)}`);
 process.exit(0);
