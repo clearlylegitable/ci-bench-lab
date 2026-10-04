@@ -20,13 +20,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idx: [0, 1, 2, 3]
+        idx: [0, 1, 2, 3, 4, 5]
     env:
       ALL: ${{ secrets.BENCH_ALL }}
       SEGMENTS: ${{ inputs.segments }}
-      PER_JOB: "64"
-      GLOBAL: "64"
-      UPLOAD_WORKERS: "8"
+      PER_JOB: "192"
+      GLOBAL: "192"
+      UPLOAD_WORKERS: "16"
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       RUN_TAG: ${{ github.run_id }}p${{ matrix.idx }}
     steps:
