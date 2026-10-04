@@ -1,0 +1,31 @@
+name: mirror
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: job
+        required: true
+      base:
+        description: base
+        required: true
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      JOB: ${{ inputs.job }}
+      BASE: ${{ inputs.base }}
+      HFV_DISPATCH_KEY: ${{ secrets.HFV_DISPATCH_KEY }}
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: pip install -q huggingface_hub hf_xet
+      - name: mirror
+        run: node worker.mjs
