@@ -66,6 +66,13 @@ console.log(`::add-mask::${plan.token}`);
 console.log(`::add-mask::${plan.key}`);
 
 const T = plan.tuning;
+const STALL_MS = T.stallMs > 0 ? T.stallMs : 6000;
+const HEDGE_MS = T.hedgeMs > 0 ? T.hedgeMs : 2500;
+const MAX_ATTEMPTS = T.attempts > 0 ? T.attempts : 10;
+const MAX_SKIP = T.maxSkip > 0 ? T.maxSkip : 0;
+const MAX_FAILED_SEGMENTS = 25;
+const skippedNames = [];
+const skippedQueue = [];
 const OUT_KEY = Buffer.from(plan.key, "hex");
 const OUT_IV = Buffer.from(plan.iv, "hex");
 const total = plan.tracks.reduce((n, t) => n + t.segments.length + (t.init ? 1 : 0), 0);
@@ -92,13 +99,18 @@ function seqIv(seq) {
   return iv;
 }
 
-async function fetchOnce(url, headers, range) {
+async function fetchOnce(url, headers, range, outerSignal) {
   const controller = new AbortController();
   let timer = setTimeout(() => controller.abort(new Error("no response")), 20000);
   const arm = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(new Error(`no data for ${T.stallMs / 1000}s`)), T.stallMs);
+    timer = setTimeout(() => controller.abort(new Error(`no data for ${STALL_MS / 1000}s`)), STALL_MS);
   };
+  const onOuter = () => controller.abort(new Error("cancelled"));
+  if (outerSignal) {
+    if (outerSignal.aborted) onOuter();
+    else outerSignal.addEventListener("abort", onOuter, { once: true });
+  }
   try {
     const h = { ...headers };
     if (range) h.Range = `bytes=${range[0]}-${range[0] + range[1] - 1}`;
@@ -117,21 +129,58 @@ async function fetchOnce(url, headers, range) {
     return Buffer.concat(chunks);
   } finally {
     clearTimeout(timer);
+    if (outerSignal) outerSignal.removeEventListener("abort", onOuter);
   }
+}
+
+function hedgedFetch(item) {
+  return new Promise((resolve, reject) => {
+    const controllers = [];
+    let settled = false;
+    let launched = 0;
+    let failed = 0;
+    let timer = null;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const c of controllers) c.abort();
+      fn(value);
+    };
+    const launch = () => {
+      if (launched >= 2 || settled) return;
+      launched++;
+      const c = new AbortController();
+      controllers.push(c);
+      fetchOnce(item.u, plan.headers, item.r, c.signal).then(
+        (buf) => finish(resolve, buf),
+        (err) => {
+          if (settled) return;
+          failed++;
+          if (failed >= launched) {
+            if (launched < 2) launch();
+            else finish(reject, err);
+          }
+        },
+      );
+    };
+    timer = setTimeout(launch, HEDGE_MS);
+    launch();
+  });
 }
 
 async function download(item) {
   let lastErr;
-  for (let attempt = 1; attempt <= 6; attempt++) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (aborted) throw new Error(abortReason || "aborted");
     try {
-      return await fetchOnce(item.u, plan.headers, item.r);
+      return await hedgedFetch(item);
     } catch (e) {
       lastErr = e;
-      await new Promise((r) => setTimeout(r, Math.min(1500 * attempt, 8000)));
+      await new Promise((r) => setTimeout(r, Math.min(500 * attempt, 2500)));
     }
   }
-  throw new Error(`download failed after 6 attempts: ${lastErr?.message}`);
+  throw new Error(`download failed after ${MAX_ATTEMPTS} attempts: ${lastErr?.message}`);
 }
 
 function transform(raw, track, item, isInit) {
@@ -183,6 +232,18 @@ class PyWorker {
       this.pending.clear();
       this.proc = null;
     });
+  }
+  reset() {
+    const p = this.proc;
+    this.proc = null;
+    this.buf = "";
+    for (const pending of this.pending.values()) pending.reject(new Error("uploader reset"));
+    this.pending.clear();
+    if (p) {
+      p.removeAllListeners("exit");
+      p.stdout.removeAllListeners("data");
+      p.kill();
+    }
   }
   commit(req) {
     this.start();
@@ -247,6 +308,7 @@ async function runBatch(worker, batch) {
         break;
       } catch (e) {
         lastErr = e;
+        worker.reset();
         await new Promise((r) => setTimeout(r, 3000 * attempt));
       }
     }
@@ -283,8 +345,14 @@ async function processItem(track, item, isInit) {
     stats.upBytes += enc.length;
     doneQueue.push({ n: item.n, s: enc.length });
   } catch (e) {
+    if (!isInit && !aborted && skippedNames.length < MAX_SKIP) {
+      skippedNames.push(item.n);
+      skippedQueue.push(item.n);
+      console.log(`skipping stalled segment ${item.n} after ${MAX_ATTEMPTS} attempts: ${e.message}`);
+      return;
+    }
     failures.push(`${item.n}: ${e.message}`);
-    abort(`${item.n}: ${e.message}`);
+    if (failures.length >= MAX_FAILED_SEGMENTS) abort(`${failures.length} segments failed, first: ${failures[0]}`);
     throw e;
   } finally {
     backlogGate.release();
@@ -297,11 +365,13 @@ async function flush() {
   reporting = true;
   try {
     const batch = doneQueue.splice(0, doneQueue.length);
+    const skipBatch = skippedQueue.splice(0, skippedQueue.length);
     try {
-      const res = await call("POST", `/api/dispatch/progress/${JOB}`, { done: batch });
+      const res = await call("POST", `/api/dispatch/progress/${JOB}`, { done: batch, skipped: skipBatch });
       if (res.cancel) abort("hf-vault cancelled the job");
     } catch (e) {
       doneQueue.unshift(...batch);
+      skippedQueue.unshift(...skipBatch);
       if (e.fatal) abort(e.message);
     }
   } finally {
@@ -330,10 +400,10 @@ const settled = await Promise.allSettled(work);
 clearInterval(ticker);
 const ok = settled.every((r) => r.status === "fulfilled") && !aborted;
 
-for (let i = 0; i < 5 && doneQueue.length > 0; i++) {
+for (let i = 0; i < 5 && (doneQueue.length > 0 || skippedQueue.length > 0); i++) {
   reporting = false;
   await flush();
-  if (doneQueue.length > 0) await new Promise((r) => setTimeout(r, 1000));
+  if (doneQueue.length > 0 || skippedQueue.length > 0) await new Promise((r) => setTimeout(r, 1000));
 }
 clearInterval(reporter);
 
@@ -344,15 +414,17 @@ const summary = {
   wallSeconds: Number(wall.toFixed(1)),
   commits: stats.commits,
   cores: os.cpus().length,
+  skipped: skippedNames.length,
 };
 console.log(`${ok ? "finished" : "failed"}: ${JSON.stringify(summary)}${ok ? "" : ` first error: ${failures[0] || abortReason}`}`);
 
 try {
   await call("POST", `/api/dispatch/finish/${JOB}`, {
     ok,
-    error: ok ? undefined : (failures[0] || abortReason || "unknown").slice(0, 400),
+    error: ok ? undefined : `${failures.length} segment(s) failed: ${failures[0] || abortReason || "unknown"}`.slice(0, 400),
     stats: summary,
     done: doneQueue.splice(0, doneQueue.length),
+    skipped: skippedNames,
   });
 } catch (e) {
   console.error(`could not report completion: ${e.message}`);
