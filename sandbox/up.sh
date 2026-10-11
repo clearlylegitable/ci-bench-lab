@@ -10,6 +10,7 @@ chmod 600 "$W/authorized_keys"
 cd "$W"
 
 echo "== machine"
+SPECS="os=$OS arch=$ARCH"
 echo "os=$OS arch=$ARCH user=$(whoami)"
 if [ "$OS" = "Linux" ]; then
   echo "cpus=$(nproc) mem_mb=$(free -m | awk '/Mem:/{print $2}')"
@@ -21,6 +22,7 @@ else
   xcodebuild -version | head -2 || true
 fi
 df -h / | tail -1
+if [ "$OS" = "Linux" ]; then SPECS="$SPECS cpus=$(nproc) mem_mb=$(free -m | awk '/Mem:/{print $2}')"; else SPECS="$SPECS cpus=$(sysctl -n hw.ncpu) mem_mb=$(( $(sysctl -n hw.memsize) / 1048576 ))"; fi
 
 case "$OS-$ARCH" in
   Linux-x86_64) WS=linux_amd64; CF=cloudflared-linux-amd64 ;;
@@ -84,6 +86,7 @@ if [ -z "$HOST" ]; then
 fi
 
 echo "SBX_HOST=$HOST"
+echo "::notice title=sbx::host=$HOST user=$(whoami) $SPECS"
 echo "SBX_USER=$(whoami)"
 echo "SBX_STOP_FILE=$W/stop"
 
