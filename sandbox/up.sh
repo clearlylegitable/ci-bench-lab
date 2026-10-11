@@ -51,6 +51,7 @@ if [ ! -x /usr/sbin/sshd ]; then
   sudo apt-get install -y -qq openssh-server
 fi
 sudo mkdir -p /run/sshd /var/empty
+if [ "$OS" = "Linux" ]; then sudo usermod -p '*' "$(whoami)"; fi
 ssh-keygen -q -t ed25519 -N '' -f "$W/host_key"
 cat > "$W/sshd_config" <<EOF
 Port 2222
@@ -63,9 +64,11 @@ PubkeyAuthentication yes
 UsePAM no
 StrictModes no
 PidFile $W/sshd.pid
+LogLevel VERBOSE
 Subsystem sftp internal-sftp
 EOF
-sudo /usr/sbin/sshd -f "$W/sshd_config"
+sudo /usr/sbin/sshd -E "$W/sshd.log" -f "$W/sshd_config"
+(tail -n +1 -F "$W/sshd.log" 2>/dev/null &) 
 sleep 1
 (exec 3<>/dev/tcp/127.0.0.1/2222 && head -c 20 <&3 && echo) || { echo "sshd not listening"; exit 1; }
 
