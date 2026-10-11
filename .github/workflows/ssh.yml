@@ -1,0 +1,26 @@
+name: ssh
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+      minutes:
+        type: string
+        default: '60'
+jobs:
+  box:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: up
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash sandbox/up.sh
